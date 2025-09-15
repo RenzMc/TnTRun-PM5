@@ -50,6 +50,13 @@ class EventListener implements Listener {
                 $player->sendMessage(TF::GREEN . "You left the arena.");
             } elseif ($itemName === TF::GREEN . "Vote for Map") {
                 $event->cancel();
+                
+                // Check if FormAPI is available before opening forms
+                if (!class_exists(\jojoe77777\FormAPI\SimpleForm::class)) {
+                    $player->sendMessage(TF::RED . "Forms are not available. FormAPI plugin is required for voting.");
+                    return;
+                }
+                
                 TnTRunForm::sendVoteForm($player);
             }
         }
@@ -67,16 +74,20 @@ class EventListener implements Listener {
             // Remove player from arena and clean up all related data
             $arena->removePlayer($player);
             
-            // Check if there's only one player left (winner)
+            // Check if there's only one player left (winner) - safe handling
             if ($arena->getStatus() === Arena::STATUS_PLAYING && count($arena->getPlayers()) === 1) {
-                $winner = array_values($arena->getPlayers())[0];
-                $arena->broadcastTitle(TF::GOLD . $winner->getName() . TF::GREEN . " wins!");
-                $arena->broadcastMessage(TF::GOLD . $winner->getName() . TF::GREEN . " has won the game!");
+                $players = $arena->getPlayers();
+                $winner = reset($players); // More reliable than array_values
                 
-                // Play victory sound
-                $winner->getWorld()->addSound($winner->getPosition(), new \pocketmine\world\sound\LevelUpSound());
+                if ($winner instanceof Player && $winner->isOnline()) {
+                    $arena->broadcastTitle(TF::GOLD . $winner->getName() . TF::GREEN . " wins!");
+                    $arena->broadcastMessage(TF::GOLD . $winner->getName() . TF::GREEN . " has won the game!");
+                    
+                    // Play victory sound
+                    $winner->getWorld()->addSound($winner->getPosition(), new \pocketmine\world\sound\LevelUpSound());
+                }
                 
-                // End the game
+                // End the game regardless of winner state
                 $arena->endGame();
             }
         }
@@ -122,24 +133,38 @@ class EventListener implements Listener {
                 // During countdown, teleport player back to spawn if they try to move horizontally
                 // This allows them to still look around but not move from their position
                 if ($from->getFloorX() !== $to->getFloorX() || $from->getFloorZ() !== $to->getFloorZ()) {
-                    // Get player's spawn position
+                    // Get player's spawn position with safe handling
                     $spawnPositions = $arena->getSpawnPositions();
+                    $nearestSpawn = null;
+                    $minDistance = PHP_FLOAT_MAX;
+                    
                     foreach ($spawnPositions as $spawnPos) {
-                        // Find a spawn position close to the player's current position
+                        if (!isset($spawnPos["x"], $spawnPos["y"], $spawnPos["z"])) {
+                            continue; // Skip invalid spawn positions
+                        }
+                        
                         $spawnX = $spawnPos["x"];
                         $spawnZ = $spawnPos["z"];
+                        $distance = sqrt(
+                            pow($spawnX - $player->getPosition()->getX(), 2) + 
+                            pow($spawnZ - $player->getPosition()->getZ(), 2)
+                        );
                         
-                        if (abs($spawnX - $player->getPosition()->getX()) < 2 && 
-                            abs($spawnZ - $player->getPosition()->getZ()) < 2) {
-                            // Teleport player back to their spawn position
-                            $player->teleport(new \pocketmine\world\Position(
-                                $spawnX,
-                                $spawnPos["y"],
-                                $spawnZ,
-                                $player->getWorld()
-                            ));
-                            break;
+                        if ($distance < $minDistance) {
+                            $minDistance = $distance;
+                            $nearestSpawn = $spawnPos;
                         }
+                    }
+                    
+                    if ($nearestSpawn !== null) {
+                        // Teleport player back to their nearest spawn position
+                        $safeY = max(1, min(319, $nearestSpawn["y"])); // Ensure safe Y coordinate
+                        $player->teleport(new \pocketmine\world\Position(
+                            $nearestSpawn["x"],
+                            $safeY,
+                            $nearestSpawn["z"],
+                            $player->getWorld()
+                        ));
                     }
                 }
                 break;
@@ -157,16 +182,20 @@ class EventListener implements Listener {
                         }
                     }
                     
-                    // Check if there's only one player left (winner)
+                    // Check if there's only one player left (winner) - safe handling
                     if (count($arena->getPlayers()) === 1) {
-                        $winner = array_values($arena->getPlayers())[0];
-                        $arena->broadcastTitle(TF::GOLD . $winner->getName() . TF::GREEN . " wins!");
-                        $arena->broadcastMessage(TF::GOLD . $winner->getName() . TF::GREEN . " has won the game!");
+                        $players = $arena->getPlayers();
+                        $winner = reset($players); // More reliable than array_values
                         
-                        // Play victory sound
-                        $winner->getWorld()->addSound($winner->getPosition(), new \pocketmine\world\sound\LevelUpSound());
+                        if ($winner instanceof Player && $winner->isOnline()) {
+                            $arena->broadcastTitle(TF::GOLD . $winner->getName() . TF::GREEN . " wins!");
+                            $arena->broadcastMessage(TF::GOLD . $winner->getName() . TF::GREEN . " has won the game!");
+                            
+                            // Play victory sound
+                            $winner->getWorld()->addSound($winner->getPosition(), new \pocketmine\world\sound\LevelUpSound());
+                        }
                         
-                        // End the game
+                        // End the game regardless of winner state
                         $arena->endGame();
                     }
                 } else {
@@ -179,7 +208,7 @@ class EventListener implements Listener {
                     $block = $world->getBlock($blockPos);
                     
                     // Don't remove air blocks
-                    if ($block->getId() !== 0) {
+                    if (!$block->isSameType(\pocketmine\block\VanillaBlocks::AIR())) {
                         // Replace with air
                         $world->setBlock($blockPos, \pocketmine\block\VanillaBlocks::AIR());
                         
@@ -200,18 +229,61 @@ class EventListener implements Listener {
         // Check if player is in an arena
         $arena = $this->getPlayerArena($player);
         if ($arena !== null) {
+            // Prevent item and XP drops
             $event->setDrops([]);
             $event->setXpDropAmount(0);
             
-            // Schedule player removal after respawn
+            // Store player data for safe removal after respawn
+            $playerName = $player->getName();
+            $arenaName = $arena->getName();
+            
+            // Use a slightly longer delay to ensure player is fully respawned
             $this->plugin->getScheduler()->scheduleDelayedTask(new \pocketmine\scheduler\ClosureTask(
-                function() use ($player, $arena): void {
-                    if ($player->isOnline()) {
+                function() use ($playerName, $arenaName): void {
+                    $plugin = TnTRun::getInstance();
+                    $arena = $plugin->getArenaManager()->getArena($arenaName);
+                    
+                    // Make sure both arena and player still exist
+                    if ($arena === null) {
+                        return;
+                    }
+                    
+                    $player = \pocketmine\Server::getInstance()->getPlayerExact($playerName);
+                    if ($player === null || !$player->isOnline()) {
+                        return;
+                    }
+                    
+                    // Check if player is still in the arena (might have been removed by another event)
+                    if (isset($arena->getPlayers()[$playerName])) {
                         $arena->removePlayer($player);
                         $player->sendMessage(TF::RED . "You died and were eliminated!");
+                        
+                        // Play elimination sound for other players
+                        foreach ($arena->getPlayers() as $p) {
+                            if ($p->getName() !== $playerName) {
+                                $p->getWorld()->addSound($p->getPosition(), new \pocketmine\world\sound\BlazeShootSound());
+                            }
+                        }
+                        
+                        // Check if there's only one player left (winner)
+                        if (count($arena->getPlayers()) === 1) {
+                            $players = $arena->getPlayers();
+                            $winner = reset($players);
+                            
+                            if ($winner instanceof Player && $winner->isOnline()) {
+                                $arena->broadcastTitle(TF::GOLD . $winner->getName() . TF::GREEN . " wins!");
+                                $arena->broadcastMessage(TF::GOLD . $winner->getName() . TF::GREEN . " has won the game!");
+                                
+                                // Play victory sound
+                                $winner->getWorld()->addSound($winner->getPosition(), new \pocketmine\world\sound\LevelUpSound());
+                            }
+                            
+                            // End the game
+                            $arena->endGame();
+                        }
                     }
                 }
-            ), 1);
+            ), 5); // Increased delay from 1 to 5 ticks for more reliable respawn handling
         }
     }
 

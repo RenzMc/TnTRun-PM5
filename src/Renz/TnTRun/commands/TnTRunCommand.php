@@ -37,16 +37,19 @@ class TnTRunCommand extends Command implements PluginOwned {
             return false;
         }
 
-        if (empty($args) || $args[0] === "help") {
-            if ($args[0] === "help") {
-                return $this->handleHelpCommand($sender);
-            } else {
-                // Open main form
-                TnTRunForm::sendMainForm($sender);
+        if (empty($args)) {
+            // Check if FormAPI is available before opening forms
+            if (!class_exists(\jojoe77777\FormAPI\SimpleForm::class)) {
+                $sender->sendMessage(TF::RED . "Forms are not available. FormAPI plugin is required.");
+                $sender->sendMessage(TF::YELLOW . "Use /tr help to see available commands.");
                 return true;
             }
+            
+            // Open main form
+            TnTRunForm::sendMainForm($sender);
+            return true;
         }
-
+        
         switch ($args[0]) {
             case "help":
                 return $this->handleHelpCommand($sender);
@@ -99,7 +102,7 @@ class TnTRunCommand extends Command implements PluginOwned {
             return false;
         }
 
-        if (count($args) < 4) {
+        if (count($args) < 5) {
             $sender->sendMessage(TF::RED . "Usage: /tntrun create <name> <world> <minPlayers> <maxPlayers>");
             return false;
         }
@@ -132,8 +135,8 @@ class TnTRunCommand extends Command implements PluginOwned {
         }
 
         // Validate player counts
-        if ($minPlayers < 2) {
-            $sender->sendMessage(TF::RED . "Minimum players must be at least 2.");
+        if ($minPlayers < 1) {
+            $sender->sendMessage(TF::RED . "Minimum players must be at least 1.");
             return false;
         }
 
@@ -231,14 +234,16 @@ class TnTRunCommand extends Command implements PluginOwned {
         $world = $this->plugin->getServer()->getWorldManager()->getWorldByName($locationData["world"]);
         
         if ($world !== null) {
-            $position = new \pocketmine\world\Position(
+            $location = new \pocketmine\world\Location(
                 $locationData["x"],
                 $locationData["y"],
                 $locationData["z"],
-                $world
+                $world,
+                $locationData["yaw"],
+                $locationData["pitch"]
             );
             
-            $player->teleport($position, $locationData["yaw"], $locationData["pitch"]);
+            $player->teleport($location);
         }
         
         // Remove the saved location
@@ -415,6 +420,12 @@ class TnTRunCommand extends Command implements PluginOwned {
      * Handle the vote command
      */
     private function handleVoteCommand(Player $sender): bool {
+        // Check if FormAPI is available before opening forms
+        if (!class_exists(\jojoe77777\FormAPI\SimpleForm::class)) {
+            $sender->sendMessage(TF::RED . "Forms are not available. FormAPI plugin is required for voting.");
+            return true;
+        }
+        
         // Open vote form
         TnTRunForm::sendVoteForm($sender);
         return true;
@@ -447,8 +458,8 @@ class TnTRunCommand extends Command implements PluginOwned {
             return false;
         }
 
-        if (count($arena->getPlayers()) < 2) {
-            $sender->sendMessage(TF::RED . "Arena '$name' needs at least 2 players to start.");
+        if (count($arena->getPlayers()) < $arena->getMinPlayers()) {
+            $sender->sendMessage(TF::RED . "Arena '$name' needs at least " . $arena->getMinPlayers() . " players to start.");
             return false;
         }
 

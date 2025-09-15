@@ -14,12 +14,19 @@ class TnTRunForm {
      * Send the main TnTRun form to a player
      */
     public static function sendMainForm(Player $player): void {
+        // Check if FormAPI is available
+        if (!class_exists(\jojoe77777\FormAPI\SimpleForm::class)) {
+            $player->sendMessage(TF::RED . "Forms are not available. FormAPI plugin is required.");
+            return;
+        }
+        
         $plugin = TnTRun::getInstance();
         
         // Play sound when opening form
         $player->getWorld()->addSound($player->getPosition(), new \pocketmine\world\sound\PopSound());
         
-        $form = new \jojoe77777\FormAPI\SimpleForm(function (Player $player, ?int $data) use ($plugin) {
+        $playerName = $player->getName(); // Avoid capturing $player object
+        $form = new \jojoe77777\FormAPI\SimpleForm(function (Player $player, ?int $data) use ($plugin, $playerName) {
             if ($data === null) {
                 return;
             }
@@ -66,6 +73,12 @@ class TnTRunForm {
      * Send the join arena form to a player
      */
     public static function sendJoinForm(Player $player): void {
+        // Check if FormAPI is available
+        if (!class_exists(\jojoe77777\FormAPI\SimpleForm::class)) {
+            $player->sendMessage(TF::RED . "Forms are not available. FormAPI plugin is required.");
+            return;
+        }
+        
         $plugin = TnTRun::getInstance();
         $arenas = $plugin->getArenaManager()->getArenas();
         
@@ -79,7 +92,8 @@ class TnTRunForm {
         // Play sound when opening form
         $player->getWorld()->addSound($player->getPosition(), new \pocketmine\world\sound\PopSound());
         
-        $form = new \jojoe77777\FormAPI\SimpleForm(function (Player $player, ?int $data) use ($plugin, $arenas) {
+        $playerName = $player->getName(); // Avoid capturing $player object
+        $form = new \jojoe77777\FormAPI\SimpleForm(function (Player $player, ?int $data) use ($plugin, $arenas, $playerName) {
             if ($data === null) {
                 return;
             }
@@ -88,6 +102,13 @@ class TnTRunForm {
             $player->getWorld()->addSound($player->getPosition(), new \pocketmine\world\sound\ClickSound());
             
             $arenaNames = array_keys($arenas);
+            
+            // Validate array bounds to prevent crashes
+            if ($data < 0 || $data >= count($arenaNames)) {
+                $player->sendMessage(TF::RED . "Invalid selection.");
+                return;
+            }
+            
             $arenaName = $arenaNames[$data];
             $arena = $arenas[$arenaName];
             
@@ -147,6 +168,12 @@ class TnTRunForm {
      * Send the vote form to a player
      */
     public static function sendVoteForm(Player $player): void {
+        // Check if FormAPI is available
+        if (!class_exists(\jojoe77777\FormAPI\SimpleForm::class)) {
+            $player->sendMessage(TF::RED . "Forms are not available. FormAPI plugin is required.");
+            return;
+        }
+        
         $plugin = TnTRun::getInstance();
         
         // Find which arena the player is in
@@ -179,7 +206,8 @@ class TnTRunForm {
         // Play sound when opening form
         $player->getWorld()->addSound($player->getPosition(), new \pocketmine\world\sound\PopSound());
         
-        $form = new \jojoe77777\FormAPI\SimpleForm(function (Player $player, ?int $data) use ($plugin, $arenas, $playerArena) {
+        $playerName = $player->getName(); // Avoid capturing $player object
+        $form = new \jojoe77777\FormAPI\SimpleForm(function (Player $player, ?int $data) use ($plugin, $arenas, $playerName) {
             if ($data === null) {
                 return;
             }
@@ -188,9 +216,30 @@ class TnTRunForm {
             $player->getWorld()->addSound($player->getPosition(), new \pocketmine\world\sound\ClickSound());
             
             $arenaNames = array_keys($arenas);
+            
+            // Validate array bounds to prevent crashes
+            if ($data < 0 || $data >= count($arenaNames)) {
+                $player->sendMessage(TF::RED . "Invalid selection.");
+                return;
+            }
+            
             $votedArenaName = $arenaNames[$data];
             
-            if ($playerArena->addVote($player, $votedArenaName)) {
+            // Re-validate player is still in arena before voting
+            $currentArena = null;
+            foreach ($plugin->getArenaManager()->getArenas() as $arena) {
+                if (isset($arena->getPlayers()[$player->getName()])) {
+                    $currentArena = $arena;
+                    break;
+                }
+            }
+            
+            if ($currentArena === null || $currentArena->getStatus() !== Arena::STATUS_WAITING) {
+                $player->sendMessage(TF::RED . "You can no longer vote at this time.");
+                return;
+            }
+            
+            if ($currentArena->addVote($player, $votedArenaName)) {
                 $player->sendMessage(TF::GREEN . "You voted for " . $votedArenaName . "!");
             } else {
                 $player->sendMessage(TF::RED . "Failed to vote for " . $votedArenaName . ".");

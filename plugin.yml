@@ -1,9 +1,10 @@
 name: TnTRun
-version: 1.0.0
-api: 5.32.0
+version: 1.0.1
+api: 5.20.0
 main: Renz\TnTRun\TnTRun
 author: Renz
 description: TnTRun minigame plugin for PocketMine-MP
+softdepend: ["FormAPI"]
 permissions:
   tntrun.command:
     default: true

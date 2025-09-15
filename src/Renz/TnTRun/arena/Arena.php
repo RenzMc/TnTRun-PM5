@@ -63,6 +63,18 @@ class Arena {
     
     /** @var array */
     private array $votes = [];
+    
+    /** @var \pocketmine\scheduler\TaskHandler|null */
+    private ?\pocketmine\scheduler\TaskHandler $gameMechanicsTask = null;
+    
+    /** @var \pocketmine\scheduler\TaskHandler|null */
+    private ?\pocketmine\scheduler\TaskHandler $countdownTask = null;
+    
+    /** @var \pocketmine\scheduler\TaskHandler|null */
+    private ?\pocketmine\scheduler\TaskHandler $preStartTask = null;
+    
+    /** @var int */
+    private int $preStartTime = 0;
 
     /**
      * Arena constructor
@@ -91,8 +103,13 @@ class Arena {
      * Join a player to the arena
      */
     public function joinPlayer(Player $player): bool {
+        // Only allow joining during waiting state
+        if ($this->status !== self::STATUS_WAITING) {
+            return false;
+        }
+        
         // Check if arena is full
-        if (count($this->players) >= $this->maxPlayers && $this->status === self::STATUS_WAITING) {
+        if (count($this->players) >= $this->maxPlayers) {
             return false;
         }
         
@@ -110,7 +127,7 @@ class Arena {
         // Clear player inventory and set game mode
         $player->getInventory()->clearAll();
         $player->getArmorInventory()->clearAll();
-        $player->setGamemode(\pocketmine\player\GameMode::ADVENTURE());
+        $player->setGamemode(\pocketmine\player\GameMode::ADVENTURE);
         $player->getXpManager()->setXpAndProgress(0, 0.0);
         
         // Teleport player to lobby or spawn
@@ -179,6 +196,9 @@ class Arena {
             return;
         }
         
+        // Cancel any existing countdown task
+        $this->cancelCountdownTask();
+        
         $this->status = self::STATUS_COUNTDOWN;
         $this->countdownTime = 10; // 10 seconds countdown
         
@@ -188,24 +208,39 @@ class Arena {
         }
         
         $plugin = TnTRun::getInstance();
-        $plugin->getScheduler()->scheduleRepeatingTask(new ClosureTask(
-            function() use ($plugin): void {
-                if ($this->countdownTime <= 0) {
-                    $this->startGame();
+        $arenaName = $this->name; // Avoid capturing $this
+        
+        $this->countdownTask = $plugin->getScheduler()->scheduleRepeatingTask(new ClosureTask(
+            function() use ($plugin, $arenaName): void {
+                $arena = $plugin->getArenaManager()->getArena($arenaName);
+                if ($arena === null) {
                     return;
                 }
                 
-                if ($this->countdownTime <= 5 || $this->countdownTime % 5 === 0) {
-                    $this->broadcastTitle(TF::YELLOW . "Starting in " . TF::RED . $this->countdownTime . TF::YELLOW . " seconds!");
-                    $this->broadcastMessage(TF::YELLOW . "Game starting in " . TF::RED . $this->countdownTime . TF::YELLOW . " seconds!");
+                $countdownTime = $arena->getCountdownTime();
+                
+                if ($countdownTime <= 0) {
+                    $arena->startGame();
+                    return;
+                }
+                
+                // Check if we still have enough players
+                if (count($arena->getPlayers()) < $arena->getMinPlayers()) {
+                    $arena->cancelCountdown();
+                    return;
+                }
+                
+                if ($countdownTime <= 5 || $countdownTime % 5 === 0) {
+                    $arena->broadcastTitle(TF::YELLOW . "Starting in " . TF::RED . $countdownTime . TF::YELLOW . " seconds!");
+                    $arena->broadcastMessage(TF::YELLOW . "Game starting in " . TF::RED . $countdownTime . TF::YELLOW . " seconds!");
                     
                     // Play sound
-                    foreach ($this->players as $player) {
+                    foreach ($arena->getPlayers() as $player) {
                         $player->getWorld()->addSound($player->getPosition(), new \pocketmine\world\sound\ClickSound());
                     }
                 }
                 
-                $this->countdownTime--;
+                $arena->decrementCountdown();
             }
         ), 20); // Run every second
     }
@@ -218,16 +253,18 @@ class Arena {
             return;
         }
         
-        // Check if we have enough players
-        if (count($this->players) < 2) {
-            $this->broadcastMessage(TF::RED . "Not enough players to start the game!");
+        // Cancel countdown task since game is starting
+        $this->cancelCountdownTask();
+        
+        // Check if we have enough players (use minPlayers instead of hardcoded 2)
+        if (count($this->players) < $this->minPlayers) {
+            $this->broadcastMessage(TF::RED . "Not enough players to start the game! Need at least " . $this->minPlayers . " players.");
             $this->status = self::STATUS_WAITING;
+            $this->countdownTime = 0;
             return;
         }
         
-        $this->status = self::STATUS_PLAYING;
-        
-        // Teleport all players to arena
+        // Teleport all players to arena and prepare them
         foreach ($this->players as $player) {
             $this->teleportToArena($player);
             
@@ -235,69 +272,17 @@ class Arena {
             $player->getInventory()->clearAll();
             $player->getArmorInventory()->clearAll();
             
-            // Freeze players
-            $player->setImmobile(true);
+            // Freeze players by setting effect (compatible alternative)
+            $player->getEffects()->add(new \pocketmine\entity\effect\EffectInstance(
+                \pocketmine\entity\effect\VanillaEffects::SLOWNESS(),
+                99999, // Duration in ticks (very long)
+                255,   // Amplifier (maximum slowness)
+                false  // Not visible
+            ));
         }
         
-        // Start game countdown
-        $this->broadcastTitle(TF::GREEN . "Get Ready!");
-        $this->broadcastMessage(TF::GREEN . "The game is starting!");
-        
-        $plugin = TnTRun::getInstance();
-        $plugin->getScheduler()->scheduleDelayedTask(new ClosureTask(
-            function() use ($plugin): void {
-                $this->broadcastTitle(TF::YELLOW . "3");
-                
-                // Play sound
-                foreach ($this->players as $player) {
-                    $player->getWorld()->addSound($player->getPosition(), new \pocketmine\world\sound\ClickSound());
-                }
-            }
-        ), 20); // 1 second
-        
-        $plugin->getScheduler()->scheduleDelayedTask(new ClosureTask(
-            function() use ($plugin): void {
-                $this->broadcastTitle(TF::YELLOW . "2");
-                
-                // Play sound
-                foreach ($this->players as $player) {
-                    $player->getWorld()->addSound($player->getPosition(), new \pocketmine\world\sound\ClickSound());
-                }
-            }
-        ), 40); // 2 seconds
-        
-        $plugin->getScheduler()->scheduleDelayedTask(new ClosureTask(
-            function() use ($plugin): void {
-                $this->broadcastTitle(TF::YELLOW . "1");
-                
-                // Play sound
-                foreach ($this->players as $player) {
-                    $player->getWorld()->addSound($player->getPosition(), new \pocketmine\world\sound\ClickSound());
-                }
-            }
-        ), 60); // 3 seconds
-        
-        $plugin->getScheduler()->scheduleDelayedTask(new ClosureTask(
-            function() use ($plugin): void {
-                $this->broadcastTitle(TF::GREEN . "GO!");
-                
-                // Unfreeze players
-                foreach ($this->players as $player) {
-                    $player->setImmobile(false);
-                }
-                
-                // Play sound
-                foreach ($this->players as $player) {
-                    $player->getWorld()->addSound($player->getPosition(), new \pocketmine\world\sound\ExplodeSound());
-                }
-                
-                // Change status to playing
-                $this->status = self::STATUS_PLAYING;
-                
-                // Start game mechanics
-                $this->startGameMechanics();
-            }
-        ), 80); // 4 seconds
+        // Start pre-start countdown (3-2-1-GO)
+        $this->startPreStartCountdown();
     }
 
     /**
@@ -305,15 +290,25 @@ class Arena {
      * Block removal is now handled in the PlayerMoveEvent
      */
     private function startGameMechanics(): void {
+        // Cancel any existing game mechanics task
+        $this->cancelGameMechanicsTask();
+        
         $plugin = TnTRun::getInstance();
-        $plugin->getScheduler()->scheduleRepeatingTask(new ClosureTask(
-            function() use ($plugin): void {
-                if ($this->status !== self::STATUS_PLAYING) {
+        $arenaName = $this->name; // Avoid capturing $this in closure
+        
+        $this->gameMechanicsTask = $plugin->getScheduler()->scheduleRepeatingTask(new ClosureTask(
+            function() use ($plugin, $arenaName): void {
+                $arena = $plugin->getArenaManager()->getArena($arenaName);
+                if ($arena === null || $arena->getStatus() !== Arena::STATUS_PLAYING) {
                     return;
                 }
                 
                 // Check for players who aren't moving but should still have blocks removed
-                foreach ($this->players as $player) {
+                foreach ($arena->getPlayers() as $player) {
+                    if (!$player->isOnline()) {
+                        continue;
+                    }
+                    
                     $position = $player->getPosition();
                     $world = $position->getWorld();
                     
@@ -322,7 +317,7 @@ class Arena {
                     $block = $world->getBlock($blockPos);
                     
                     // Don't remove air blocks
-                    if ($block->getId() !== 0) {
+                    if (!$block->isSameType(\pocketmine\block\VanillaBlocks::AIR())) {
                         // Replace with air
                         $world->setBlock($blockPos, VanillaBlocks::AIR());
                         
@@ -344,14 +339,19 @@ class Arena {
         
         $this->status = self::STATUS_ENDING;
         
+        // Cancel all active tasks immediately to prevent conflicts
+        $this->cancelAllTasks();
+        
         // Check for winner
         if (count($this->players) === 1) {
             $winner = reset($this->players);
-            $this->broadcastTitle(TF::GREEN . $winner->getName() . " wins!");
-            $this->broadcastMessage(TF::GREEN . $winner->getName() . " has won the game!");
-            
-            // Play victory sound
-            $winner->getWorld()->addSound($winner->getPosition(), new \pocketmine\world\sound\LevelUpSound());
+            if ($winner instanceof Player && $winner->isOnline()) {
+                $this->broadcastTitle(TF::GREEN . $winner->getName() . " wins!");
+                $this->broadcastMessage(TF::GREEN . $winner->getName() . " has won the game!");
+                
+                // Play victory sound
+                $winner->getWorld()->addSound($winner->getPosition(), new \pocketmine\world\sound\LevelUpSound());
+            }
         } else {
             $this->broadcastTitle(TF::RED . "Game Over!");
             $this->broadcastMessage(TF::RED . "The game has ended with no winner!");
@@ -359,9 +359,14 @@ class Arena {
         
         // Schedule reset task
         $plugin = TnTRun::getInstance();
+        $arenaName = $this->name; // Avoid capturing $this
+        
         $plugin->getScheduler()->scheduleDelayedTask(new ClosureTask(
-            function() use ($plugin): void {
-                $this->resetArena();
+            function() use ($plugin, $arenaName): void {
+                $arena = $plugin->getArenaManager()->getArena($arenaName);
+                if ($arena !== null) {
+                    $arena->resetArena();
+                }
             }
         ), 100); // 5 seconds
     }
@@ -370,18 +375,27 @@ class Arena {
      * Reset the arena
      */
     public function resetArena(): void {
-        // Return all players to their original locations
+        // Cancel ALL running tasks first (comprehensive safety)
+        $this->cancelAllTasks();
+        
+        // Return all players to their original locations safely
         foreach ($this->players as $player) {
-            $this->restorePlayerLocation($player);
+            if ($player instanceof Player && $player->isOnline()) {
+                // Clear effects before restoring location
+                $player->getEffects()->clear();
+                $this->restorePlayerLocation($player);
+            }
         }
         
-        // Clear players
+        // Clear all player data
         $this->players = [];
         $this->spectators = [];
         $this->votes = [];
         
-        // Reset status
+        // Reset status and all counters
         $this->status = self::STATUS_WAITING;
+        $this->countdownTime = 0;
+        $this->preStartTime = 0;
     }
 
     /**
@@ -389,6 +403,15 @@ class Arena {
      */
     private function savePlayerLocation(Player $player): void {
         $position = $player->getPosition();
+        // Store player's original location and gamemode
+        $gamemode = match ($player->getGamemode()) {
+            \pocketmine\player\GameMode::SURVIVAL => 0,
+            \pocketmine\player\GameMode::CREATIVE => 1,
+            \pocketmine\player\GameMode::ADVENTURE => 2,
+            \pocketmine\player\GameMode::SPECTATOR => 3,
+            default => 0
+        };
+        
         $this->playerOriginalLocations[$player->getName()] = [
             "world" => $position->getWorld()->getFolderName(),
             "x" => $position->getX(),
@@ -396,7 +419,7 @@ class Arena {
             "z" => $position->getZ(),
             "yaw" => $player->getLocation()->getYaw(),
             "pitch" => $player->getLocation()->getPitch(),
-            "gamemode" => $player->getGamemode()->getId()
+            "gamemode" => $gamemode
         ];
     }
 
@@ -414,18 +437,34 @@ class Arena {
         $world = Server::getInstance()->getWorldManager()->getWorldByName($locationData["world"]);
         
         if ($world !== null) {
-            $position = new Position(
+            $location = new \pocketmine\world\Location(
                 $locationData["x"],
                 $locationData["y"],
                 $locationData["z"],
-                $world
+                $world,
+                $locationData["yaw"],
+                $locationData["pitch"]
             );
             
-            $player->teleport($position, $locationData["yaw"], $locationData["pitch"]);
+            $player->teleport($location);
             
             // Restore player's original gamemode
             if (isset($locationData["gamemode"])) {
-                $player->setGamemode(\pocketmine\player\GameMode::fromInt($locationData["gamemode"]));
+                // Convert integer gamemode to enum case
+                switch ($locationData["gamemode"]) {
+                    case 0:
+                        $player->setGamemode(\pocketmine\player\GameMode::SURVIVAL);
+                        break;
+                    case 1:
+                        $player->setGamemode(\pocketmine\player\GameMode::CREATIVE);
+                        break;
+                    case 2:
+                        $player->setGamemode(\pocketmine\player\GameMode::ADVENTURE);
+                        break;
+                    case 3:
+                        $player->setGamemode(\pocketmine\player\GameMode::SPECTATOR);
+                        break;
+                }
             }
         }
         
@@ -436,17 +475,39 @@ class Arena {
      * Teleport player to lobby
      */
     private function teleportToLobby(Player $player): void {
+        if (empty($this->lobbyWorld) || empty($this->lobbyPosition)) {
+            // Fallback to arena teleport if lobby not configured
+            $this->teleportToArena($player);
+            return;
+        }
+        
         $world = Server::getInstance()->getWorldManager()->getWorldByName($this->lobbyWorld);
         
-        if ($world !== null && !empty($this->lobbyPosition)) {
+        if ($world === null) {
+            // Try to load the world first
+            if (!Server::getInstance()->getWorldManager()->loadWorld($this->lobbyWorld)) {
+                // Fallback to arena teleport if lobby world fails to load
+                $this->teleportToArena($player);
+                return;
+            }
+            $world = Server::getInstance()->getWorldManager()->getWorldByName($this->lobbyWorld);
+        }
+        
+        if ($world !== null && isset($this->lobbyPosition["x"], $this->lobbyPosition["y"], $this->lobbyPosition["z"])) {
+            // Ensure Y coordinate is safe (not below 0 or above 320)
+            $safeY = max(1, min(319, $this->lobbyPosition["y"]));
+            
             $position = new Position(
                 $this->lobbyPosition["x"],
-                $this->lobbyPosition["y"],
+                $safeY,
                 $this->lobbyPosition["z"],
                 $world
             );
             
             $player->teleport($position);
+        } else {
+            // Ultimate fallback to arena teleport
+            $this->teleportToArena($player);
         }
     }
 
@@ -457,26 +518,51 @@ class Arena {
         $world = Server::getInstance()->getWorldManager()->getWorldByName($this->world);
         
         if ($world === null) {
-            return;
-        }
-        
-        // Get spawn position
-        $spawnIndex = array_rand($this->spawnPositions);
-        $spawnPos = $this->spawnPositions[$spawnIndex];
-        
-        if (!empty($spawnPos)) {
-            $position = new Position(
-                $spawnPos["x"],
-                $spawnPos["y"],
-                $spawnPos["z"],
-                $world
-            );
+            // Try to load the world first
+            if (!Server::getInstance()->getWorldManager()->loadWorld($this->world)) {
+                // Critical error - cannot load arena world
+                $player->sendMessage(TF::RED . "Error: Arena world could not be loaded!");
+                return;
+            }
+            $world = Server::getInstance()->getWorldManager()->getWorldByName($this->world);
             
-            $player->teleport($position);
-        } else {
-            // Use world's spawn point if no specific spawn is set
-            $player->teleport($world->getSpawnLocation());
+            if ($world === null) {
+                $player->sendMessage(TF::RED . "Error: Arena world is not available!");
+                return;
+            }
         }
+        
+        // Check if spawn positions are configured and not empty
+        if (!empty($this->spawnPositions)) {
+            $spawnIndex = array_rand($this->spawnPositions);
+            $spawnPos = $this->spawnPositions[$spawnIndex];
+            
+            if (!empty($spawnPos) && isset($spawnPos["x"], $spawnPos["y"], $spawnPos["z"])) {
+                // Ensure Y coordinate is safe (not below 0 or above 320)
+                $safeY = max(1, min(319, $spawnPos["y"]));
+                
+                $position = new Position(
+                    $spawnPos["x"],
+                    $safeY,
+                    $spawnPos["z"],
+                    $world
+                );
+                
+                $player->teleport($position);
+                return;
+            }
+        }
+        
+        // Fallback to world's spawn point if no valid spawn positions
+        $worldSpawn = $world->getSpawnLocation();
+        // Ensure spawn Y is safe
+        $safeSpawn = new Position(
+            $worldSpawn->getX(),
+            max(1, min(319, $worldSpawn->getY())),
+            $worldSpawn->getZ(),
+            $world
+        );
+        $player->teleport($safeSpawn);
     }
 
     /**
@@ -693,5 +779,173 @@ class Arena {
      */
     public function getPlayers(): array {
         return $this->players;
+    }
+    
+    /**
+     * Cancel the game mechanics task if it's running
+     */
+    private function cancelGameMechanicsTask(): void {
+        if ($this->gameMechanicsTask !== null && !$this->gameMechanicsTask->isCancelled()) {
+            $this->gameMechanicsTask->cancel();
+            $this->gameMechanicsTask = null;
+        }
+    }
+    
+    /**
+     * Cancel the countdown task if it's running
+     */
+    private function cancelCountdownTask(): void {
+        if ($this->countdownTask !== null && !$this->countdownTask->isCancelled()) {
+            $this->countdownTask->cancel();
+            $this->countdownTask = null;
+        }
+    }
+    
+    /**
+     * Get current countdown time
+     */
+    public function getCountdownTime(): int {
+        return $this->countdownTime;
+    }
+    
+    /**
+     * Decrement countdown time
+     */
+    public function decrementCountdown(): void {
+        $this->countdownTime--;
+    }
+    
+    /**
+     * Cancel countdown and return to waiting state
+     */
+    public function cancelCountdown(): void {
+        $this->cancelCountdownTask();
+        $this->status = self::STATUS_WAITING;
+        $this->countdownTime = 0;
+        $this->broadcastMessage(TF::RED . "Countdown cancelled - not enough players!");
+    }
+    
+    /**
+     * Start the pre-start countdown (3-2-1-GO)
+     */
+    private function startPreStartCountdown(): void {
+        // Cancel any existing pre-start task
+        $this->cancelPreStartTask();
+        
+        $this->preStartTime = 4; // 4 seconds for 3-2-1-GO
+        $this->broadcastTitle(TF::GREEN . "Get Ready!");
+        $this->broadcastMessage(TF::GREEN . "The game is starting!");
+        
+        $plugin = TnTRun::getInstance();
+        $arenaName = $this->name; // Avoid capturing $this
+        
+        $this->preStartTask = $plugin->getScheduler()->scheduleRepeatingTask(new ClosureTask(
+            function() use ($plugin, $arenaName): void {
+                $arena = $plugin->getArenaManager()->getArena($arenaName);
+                if ($arena === null) {
+                    return;
+                }
+                
+                $preStartTime = $arena->getPreStartTime();
+                
+                // Check if arena state is still valid for pre-start
+                if ($arena->getStatus() !== Arena::STATUS_COUNTDOWN || count($arena->getPlayers()) < $arena->getMinPlayers()) {
+                    $arena->cancelPreStart();
+                    return;
+                }
+                
+                if ($preStartTime <= 0) {
+                    // GO! - Start the actual game
+                    $arena->finalizeGameStart();
+                    return;
+                }
+                
+                // Display countdown (3, 2, 1)
+                if ($preStartTime <= 3) {
+                    $arena->broadcastTitle(TF::YELLOW . (string)$preStartTime);
+                    
+                    // Play sound
+                    foreach ($arena->getPlayers() as $player) {
+                        $player->getWorld()->addSound($player->getPosition(), new \pocketmine\world\sound\ClickSound());
+                    }
+                }
+                
+                $arena->decrementPreStart();
+            }
+        ), 20); // Run every second
+    }
+    
+    /**
+     * Cancel the pre-start task if it's running
+     */
+    private function cancelPreStartTask(): void {
+        if ($this->preStartTask !== null && !$this->preStartTask->isCancelled()) {
+            $this->preStartTask->cancel();
+            $this->preStartTask = null;
+        }
+    }
+    
+    /**
+     * Cancel ALL tasks (comprehensive safety method)
+     */
+    public function cancelAllTasks(): void {
+        $this->cancelCountdownTask();
+        $this->cancelPreStartTask(); 
+        $this->cancelGameMechanicsTask();
+    }
+    
+    /**
+     * Get current pre-start time
+     */
+    public function getPreStartTime(): int {
+        return $this->preStartTime;
+    }
+    
+    /**
+     * Decrement pre-start time
+     */
+    public function decrementPreStart(): void {
+        $this->preStartTime--;
+    }
+    
+    /**
+     * Cancel pre-start and reset arena
+     */
+    public function cancelPreStart(): void {
+        $this->cancelPreStartTask();
+        $this->resetArena();
+    }
+    
+    /**
+     * Finalize game start (called when pre-start countdown reaches 0)
+     */
+    public function finalizeGameStart(): void {
+        // Cancel pre-start task
+        $this->cancelPreStartTask();
+        
+        // Double-check we still have enough players
+        if (count($this->players) < $this->minPlayers) {
+            $this->broadcastMessage(TF::RED . "Not enough players to start the game!");
+            $this->resetArena();
+            return;
+        }
+        
+        $this->broadcastTitle(TF::GREEN . "GO!");
+        
+        // Unfreeze players by removing slowness effect
+        foreach ($this->players as $player) {
+            $player->getEffects()->remove(\pocketmine\entity\effect\VanillaEffects::SLOWNESS());
+        }
+        
+        // Play sound
+        foreach ($this->players as $player) {
+            $player->getWorld()->addSound($player->getPosition(), new \pocketmine\world\sound\ExplodeSound());
+        }
+        
+        // Change status to playing
+        $this->status = self::STATUS_PLAYING;
+        
+        // Start game mechanics
+        $this->startGameMechanics();
     }
 }

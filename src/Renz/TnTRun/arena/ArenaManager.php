@@ -25,30 +25,42 @@ class ArenaManager {
     public function loadArenas(): void {
         $arenaFiles = glob($this->plugin->getDataFolder() . "arenas/*.yml");
         
-        if (!$arenaFiles) {
+        if (!$arenaFiles || !is_array($arenaFiles)) {
+            $this->plugin->getLogger()->info("No arena files found to load.");
             return;
         }
 
         foreach ($arenaFiles as $arenaFile) {
-            $config = new Config($arenaFile, Config::YAML);
             $arenaName = pathinfo($arenaFile, PATHINFO_FILENAME);
             
-            if ($this->validateArenaConfig($config)) {
-                $arena = new Arena(
-                    $arenaName,
-                    $config->get("world"),
-                    $config->get("minPlayers"),
-                    $config->get("maxPlayers"),
-                    $config->get("lobbyWorld", ""),
-                    $config->get("lobbyPosition", []),
-                    $config->get("spawnPositions", []),
-                    $config->get("blockType", "tnt")
-                );
+            try {
+                $config = new Config($arenaFile, Config::YAML);
                 
-                $this->arenas[$arenaName] = $arena;
-                $this->plugin->getLogger()->info("Loaded arena: " . $arenaName);
-            } else {
-                $this->plugin->getLogger()->warning("Failed to load arena: " . $arenaName . " (invalid configuration)");
+                // Additional safety check for corrupted config files
+                if (!$config->exists("world")) {
+                    $this->plugin->getLogger()->warning("Skipping corrupted arena config: " . $arenaName);
+                    continue;
+                }
+                
+                if ($this->validateArenaConfig($config)) {
+                    $arena = new Arena(
+                        $arenaName,
+                        $config->get("world"),
+                        max(1, $config->get("minPlayers", 2)), // Ensure minimum 1 player
+                        max(2, $config->get("maxPlayers", 10)), // Ensure minimum 2 max players
+                        $config->get("lobbyWorld", ""),
+                        $config->get("lobbyPosition", []),
+                        $this->validateSpawnPositions($config->get("spawnPositions", [])),
+                        $config->get("blockType", "tnt")
+                    );
+                    
+                    $this->arenas[$arenaName] = $arena;
+                    $this->plugin->getLogger()->info("Loaded arena: " . $arenaName);
+                } else {
+                    $this->plugin->getLogger()->warning("Failed to load arena: " . $arenaName . " (invalid configuration)");
+                }
+            } catch (\Exception $e) {
+                $this->plugin->getLogger()->error("Error loading arena config " . $arenaName . ": " . $e->getMessage());
             }
         }
     }
@@ -97,42 +109,61 @@ class ArenaManager {
         $arena = new Arena($name, $world, $minPlayers, $maxPlayers);
         $this->arenas[$name] = $arena;
         
-        // Load default arena template
-        $defaultTemplate = new Config($this->plugin->getDataFolder() . "default_arena.yml", Config::YAML);
+        // Load default arena template with error handling
+        $defaultTemplate = null;
+        try {
+            $defaultTemplate = new Config($this->plugin->getDataFolder() . "default_arena.yml", Config::YAML);
+        } catch (\Exception $e) {
+            $this->plugin->getLogger()->warning("Could not load default arena template: " . $e->getMessage());
+        }
         
         // Create new arena config
         $config = new Config($this->plugin->getDataFolder() . "arenas/" . $name . ".yml", Config::YAML);
         
         // Set basic properties
         $config->set("world", $world);
-        $config->set("minPlayers", $minPlayers);
-        $config->set("maxPlayers", $maxPlayers);
+        $config->set("minPlayers", max(1, $minPlayers)); // Ensure minimum 1
+        $config->set("maxPlayers", max(2, $maxPlayers)); // Ensure minimum 2
         
         // Copy default values for other properties
-        $config->set("lobbyWorld", $defaultTemplate->get("lobbyWorld", ""));
-        $config->set("lobbyPosition", $defaultTemplate->get("lobbyPosition", []));
-        $config->set("blockType", $defaultTemplate->get("blockType", "tnt"));
+        $config->set("lobbyWorld", $defaultTemplate ? $defaultTemplate->get("lobbyWorld", "") : "");
+        $config->set("lobbyPosition", $defaultTemplate ? $defaultTemplate->get("lobbyPosition", []) : []);
+        $config->set("blockType", $defaultTemplate ? $defaultTemplate->get("blockType", "tnt") : "tnt");
+        
+        // Get safe Y coordinate for the world
+        $safeY = $this->getSafeYForWorld($world);
         
         // Create default spawn positions based on maxPlayers
         $spawnPositions = [];
         for ($i = 0; $i < $maxPlayers; $i++) {
-            if ($defaultTemplate->getNested("spawnPositions.$i")) {
-                $spawnPositions[$i] = $defaultTemplate->getNested("spawnPositions.$i");
+            if ($defaultTemplate && $defaultTemplate->getNested("spawnPositions.$i")) {
+                $templateSpawn = $defaultTemplate->getNested("spawnPositions.$i");
+                // Validate and use safe Y coordinate
+                $spawnPositions[$i] = [
+                    "x" => $templateSpawn["x"] ?? 0,
+                    "y" => max(1, min(319, $templateSpawn["y"] ?? $safeY)),
+                    "z" => $templateSpawn["z"] ?? 0
+                ];
             } else {
                 // Create a circular pattern for spawn positions if not enough in template
                 $angle = (2 * M_PI * $i) / $maxPlayers;
                 $radius = 5;
                 $spawnPositions[$i] = [
                     "x" => round(sin($angle) * $radius),
-                    "y" => 64,
+                    "y" => $safeY,
                     "z" => round(cos($angle) * $radius)
                 ];
             }
         }
         $config->set("spawnPositions", $spawnPositions);
         
-        // Save the config
-        $config->save();
+        // Save the config with error handling
+        try {
+            $config->save();
+        } catch (\Exception $e) {
+            $this->plugin->getLogger()->error("Failed to save arena config for " . $name . ": " . $e->getMessage());
+            return false;
+        }
         
         return true;
     }
@@ -176,8 +207,71 @@ class ArenaManager {
      * Validate arena configuration
      */
     private function validateArenaConfig(Config $config): bool {
-        return $config->exists("world") && 
-               $config->exists("minPlayers") && 
-               $config->exists("maxPlayers");
+        // Check required fields
+        if (!$config->exists("world") || !$config->exists("minPlayers") || !$config->exists("maxPlayers")) {
+            return false;
+        }
+        
+        // Validate field types and values
+        $minPlayers = $config->get("minPlayers");
+        $maxPlayers = $config->get("maxPlayers");
+        
+        if (!is_int($minPlayers) || !is_int($maxPlayers) || $minPlayers < 1 || $maxPlayers < 2 || $minPlayers > $maxPlayers) {
+            return false;
+        }
+        
+        // Validate world name
+        $world = $config->get("world");
+        if (!is_string($world) || empty($world)) {
+            return false;
+        }
+        
+        return true;
+    }
+    
+    /**
+     * Validate spawn positions array and ensure safe coordinates
+     */
+    private function validateSpawnPositions(array $spawnPositions): array {
+        $validatedSpawns = [];
+        
+        foreach ($spawnPositions as $key => $spawn) {
+            if (!is_array($spawn)) {
+                continue;
+            }
+            
+            $validatedSpawns[$key] = [
+                "x" => $spawn["x"] ?? 0,
+                "y" => max(1, min(319, $spawn["y"] ?? 64)), // Ensure safe Y coordinate
+                "z" => $spawn["z"] ?? 0
+            ];
+        }
+        
+        return $validatedSpawns;
+    }
+    
+    /**
+     * Get safe Y coordinate for a world
+     */
+    private function getSafeYForWorld(string $worldName): int {
+        $worldManager = \pocketmine\Server::getInstance()->getWorldManager();
+        
+        // Try to get the world
+        $world = $worldManager->getWorldByName($worldName);
+        if ($world === null) {
+            // Try to load the world
+            if ($worldManager->loadWorld($worldName)) {
+                $world = $worldManager->getWorldByName($worldName);
+            }
+        }
+        
+        if ($world !== null) {
+            // Get world's spawn location Y coordinate as a safe baseline
+            $spawnY = $world->getSpawnLocation()->getY();
+            return max(1, min(319, (int)$spawnY));
+        }
+        
+        // Fallback to a reasonable default
+        return 64;
     }
 }
