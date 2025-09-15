@@ -1,0 +1,77 @@
+# TnTRun Configuration
+
+# General settings
+settings:
+  # Countdown time in seconds before game starts
+  countdown-time: 10
+  
+  # Game time in seconds
+  game-time: 300
+  
+  # Time in seconds to wait after game ends before resetting arena
+  end-time: 10
+  
+  # Default block type for arenas (tnt, sand, gravel, etc.)
+  default-block-type: "tnt"
+  
+  # Sound effects (true/false)
+  sounds-enabled: true
+
+# Messages
+messages:
+  # Message prefixes
+  prefix: "&6[TnTRun] &r"
+  
+  # Join messages
+  join: "&aYou joined the arena!"
+  arena-join: "&a{player} joined the arena! ({count}/{max})"
+  
+  # Leave messages
+  leave: "&cYou left the arena!"
+  arena-leave: "&c{player} left the arena! ({count}/{max})"
+  
+  # Game messages
+  game-start: "&aThe game has started!"
+  game-end: "&cThe game has ended!"
+  winner: "&6{player} has won the game!"
+  
+  # Countdown messages
+  countdown: "&eGame starting in &c{time} &eseconds!"
+  
+  # Error messages
+  arena-full: "&cThis arena is full!"
+  arena-running: "&cThis arena is already running!"
+  no-permission: "&cYou don't have permission to use this command!"
+  not-in-arena: "&cYou are not in an arena!"
+  arena-not-found: "&cArena not found!"
+
+# Form settings
+forms:
+  # Main form
+  main:
+    title: "&l&6TnTRun"
+    content: "&eWelcome to TnTRun! Select an option:"
+    
+  # Join form
+  join:
+    title: "&l&6Join Arena"
+    content: "&eSelect an arena to join:"
+    
+  # Vote form
+  vote:
+    title: "&l&6Vote for Map"
+    content: "&eSelect a map to vote for:"
+
+# Items
+items:
+  # Leave item
+  leave:
+    name: "&cLeave Arena"
+    item: "redstone"
+    slot: 0
+    
+  # Vote item
+  vote:
+    name: "&aVote for Map"
+    item: "compass"
+    slot: 4

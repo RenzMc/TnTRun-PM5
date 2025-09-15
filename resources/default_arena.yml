@@ -1,0 +1,45 @@
+# TnTRun Arena Configuration Template
+
+# Arena world name
+world: "world"
+
+# Minimum players required to start the game
+minPlayers: 2
+
+# Maximum players allowed in the arena
+maxPlayers: 16
+
+# Lobby world and position (optional)
+lobbyWorld: ""
+lobbyPosition:
+  x: 0
+  y: 64
+  z: 0
+
+# Spawn positions for players
+# The number of spawn positions should match maxPlayers
+spawnPositions:
+  0:
+    x: 0
+    y: 64
+    z: 0
+  1:
+    x: 5
+    y: 64
+    z: 0
+  2:
+    x: 0
+    y: 64
+    z: 5
+  3:
+    x: -5
+    y: 64
+    z: 0
+  4:
+    x: 0
+    y: 64
+    z: -5
+
+# Block type that will disappear under players
+# Options: tnt, sand, gravel, dirt, stone, grass, planks, etc.
+blockType: "tnt"

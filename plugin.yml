@@ -1,0 +1,13 @@
+name: TnTRun
+version: 1.0.0
+api: 5.32.0
+main: Renz\TnTRun\TnTRun
+author: Renz
+description: TnTRun minigame plugin for PocketMine-MP
+permissions:
+  tntrun.command:
+    default: true
+    description: Allows players to use TnTRun commands
+  tntrun.admin:
+    default: op
+    description: Allows admins to manage TnTRun arenas
