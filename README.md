@@ -76,21 +76,3 @@ The plugin's configuration file (`config.yml`) allows you to customize various a
 ## Author
 
 - Renz
-
-## Version
-
-1.0.1
-
-## API
-
-5.32.0
-
-## Requirements
-
-- PocketMine-MP 5.32.0 or newer
-- PHP 8.2 or newer
-- FormAPI plugin (optional, for GUI forms)
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for a detailed list of changes.
