@@ -152,6 +152,10 @@ class TnTRunForm {
                 case Arena::STATUS_SETUP:
                     $status = TF::GRAY . "Setup";
                     break;
+                
+                case Arena::STATUS_RESETTING:
+                    $status = TF::YELLOW . "Resetting";
+                    break;
             }
             
             $form->addButton(

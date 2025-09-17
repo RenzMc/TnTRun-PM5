@@ -10,6 +10,7 @@ use pocketmine\player\Player;
 use pocketmine\plugin\Plugin;
 use pocketmine\plugin\PluginOwned;
 use pocketmine\utils\TextFormat as TF;
+use pocketmine\world\sound\XpLevelUpSound;
 use Renz\TnTRun\TnTRun;
 use Renz\TnTRun\arena\Arena;
 use Renz\TnTRun\forms\TnTRunForm;
@@ -86,6 +87,12 @@ class TnTRunCommand extends Command implements PluginOwned {
             
             case "force-clear":
                 return $this->handleForceClearCommand($sender, $args);
+            
+            case "setup-complete":
+                return $this->handleSetupCompleteCommand($sender, $args);
+            
+            case "setup-exit":
+                return $this->handleSetupExitCommand($sender);
             
             default:
                 $sender->sendMessage(TF::RED . "Unknown command. Use /tr help for a list of commands.");
@@ -185,8 +192,22 @@ class TnTRunCommand extends Command implements PluginOwned {
         // Save player's original location before teleporting
         $this->saveSetupPlayerLocation($sender);
 
-        // Teleport to arena world
-        $world = $this->plugin->getServer()->getWorldManager()->getWorldByName($arena->getWorld());
+        // Get arena world name
+        $worldName = $arena->getWorld();
+        $worldManager = $this->plugin->getServer()->getWorldManager();
+        
+        // Check if world is loaded, if not try to load it
+        if (!$worldManager->isWorldLoaded($worldName)) {
+            $sender->sendMessage(TF::YELLOW . "Loading arena world '$worldName'...");
+            if (!$worldManager->loadWorld($worldName)) {
+                $sender->sendMessage(TF::RED . "Failed to load arena world '$worldName'. Make sure it exists and is valid.");
+                return false;
+            }
+            $sender->sendMessage(TF::GREEN . "Arena world '$worldName' loaded successfully.");
+        }
+        
+        // Get the world after ensuring it's loaded
+        $world = $worldManager->getWorldByName($worldName);
         
         if ($world !== null) {
             $sender->teleport($world->getSpawnLocation());
@@ -194,13 +215,15 @@ class TnTRunCommand extends Command implements PluginOwned {
             $sender->sendMessage(TF::YELLOW . "Use /tntrun setspawn <name> <position> to set spawn positions.");
             $sender->sendMessage(TF::YELLOW . "Use /tntrun typeblock <name> <blockname> to set the block type.");
             $sender->sendMessage(TF::YELLOW . "Use /tntrun setlobby <name> <world> to set the lobby location.");
+            $sender->sendMessage(TF::GREEN . "Use /tntrun setup-complete <name> to complete setup and set arena to ready.");
+            $sender->sendMessage(TF::RED . "Use /tntrun setup-exit to exit setup mode (commands are saved immediately).");
             
             // Play sound
             $sender->getWorld()->addSound($sender->getPosition(), new \pocketmine\world\sound\AnvilUseSound());
             
             return true;
         } else {
-            $sender->sendMessage(TF::RED . "Failed to load arena world.");
+            $sender->sendMessage(TF::RED . "Failed to load arena world '$worldName'. The world might not exist.");
             return false;
         }
     }
@@ -234,7 +257,7 @@ class TnTRunCommand extends Command implements PluginOwned {
         $world = $this->plugin->getServer()->getWorldManager()->getWorldByName($locationData["world"]);
         
         if ($world !== null) {
-            $location = new \pocketmine\world\Location(
+            $location = new \pocketmine\entity\Location(
                 $locationData["x"],
                 $locationData["y"],
                 $locationData["z"],
@@ -348,11 +371,25 @@ class TnTRunCommand extends Command implements PluginOwned {
             return false;
         }
 
-        // Set lobby position
-        $arena->setLobbyPosition($sender->getPosition(), $sender->getWorld());
+        // Validate lobby world is different from arena world
+        if ($worldName === $arena->getWorld()) {
+            $sender->sendMessage(TF::RED . "Error: Lobby world cannot be the same as arena world!");
+            $sender->sendMessage(TF::RED . "This is required for safety to prevent bugs. Please use a different world for the lobby.");
+            return false;
+        }
+
+        // Ensure sender is in the specified world
+        if ($sender->getWorld()->getFolderName() !== $worldName) {
+            $sender->sendMessage(TF::RED . "You must be in world '$worldName' to set the lobby position there.");
+            $sender->sendMessage(TF::YELLOW . "Please go to world '$worldName' first, then run this command again.");
+            return false;
+        }
+
+        // Set lobby position using the correct world
+        $arena->setLobbyPosition($sender->getPosition(), $world);
         $this->plugin->getArenaManager()->saveArena($arena);
 
-        $sender->sendMessage(TF::GREEN . "Lobby position set for arena '$name'.");
+        $sender->sendMessage(TF::GREEN . "Lobby position set for arena '$name' in world '$worldName'.");
         return true;
     }
 
@@ -531,6 +568,246 @@ class TnTRunCommand extends Command implements PluginOwned {
     }
 
     /**
+     * Handle the setup-complete command
+     */
+    private function handleSetupCompleteCommand(Player $sender, array $args): bool {
+        if (!$sender->hasPermission("tntrun.admin")) {
+            $sender->sendMessage(TF::RED . "You don't have permission to use this command.");
+            return false;
+        }
+
+        if (count($args) < 2) {
+            $sender->sendMessage(TF::RED . "Usage: /tntrun setup-complete <name>");
+            return false;
+        }
+
+        $name = $args[1];
+        $arena = $this->plugin->getArenaManager()->getArena($name);
+
+        if ($arena === null) {
+            $sender->sendMessage(TF::RED . "Arena '$name' does not exist.");
+            return false;
+        }
+
+        if (!isset($this->setupMode[$sender->getName()]) || $this->setupMode[$sender->getName()] !== $name) {
+            $sender->sendMessage(TF::RED . "You are not currently setting up arena '$name'.");
+            return false;
+        }
+
+        // Validate arena setup with detailed error messages
+        $setupErrors = $this->validateArenaSetupWithDetails($arena);
+        if (!empty($setupErrors)) {
+            $sender->sendMessage(TF::RED . "Arena setup is incomplete. The following items need to be configured:");
+            foreach ($setupErrors as $error) {
+                $sender->sendMessage(TF::RED . "- " . $error);
+            }
+            return false;
+        }
+
+        // Validate lobby world is different from arena world
+        if (!empty($arena->getLobbyWorld()) && $arena->getLobbyWorld() === $arena->getWorld()) {
+            $sender->sendMessage(TF::RED . "Error: Lobby world cannot be the same as arena world! Please set a different lobby world for safety.");
+            return false;
+        }
+
+        // Copy arena world to data folder for backup
+        if ($this->copyArenaWorld($arena)) {
+            // Exit setup mode and set arena to ready state (WAITING)
+            $arena->setSetupMode(false);
+            unset($this->setupMode[$sender->getName()]);
+            
+            // Restore player location
+            $this->restoreSetupPlayerLocation($sender);
+            
+            // Save arena configuration
+            $this->plugin->getArenaManager()->saveArena($arena);
+            
+            $sender->sendMessage(TF::GREEN . "Arena '$name' setup completed successfully!");
+            $sender->sendMessage(TF::GREEN . "Arena is now ready for play and world backup has been created.");
+            $sender->sendMessage(TF::AQUA . "Players can now join this arena!");
+            
+            // Play success sound
+            $sender->getWorld()->addSound($sender->getPosition(), new XpLevelUpSound(1));
+            
+            return true;
+        } else {
+            $sender->sendMessage(TF::RED . "Failed to create world backup. Arena setup not completed.");
+            return false;
+        }
+    }
+    
+    /**
+     * Validate arena setup and return a list of missing requirements
+     * 
+     * @return array List of setup errors, empty if all valid
+     */
+    private function validateArenaSetupWithDetails(Arena $arena): array {
+        $errors = [];
+        
+        // Check if arena has a valid world
+        $worldName = $arena->getWorld();
+        if (empty($worldName)) {
+            $errors[] = "Arena world is not set";
+        } elseif (!$this->plugin->getServer()->getWorldManager()->isWorldGenerated($worldName)) {
+            $errors[] = "Arena world '$worldName' does not exist";
+        }
+        
+        // Check if arena has spawn positions
+        $spawnPositions = $arena->getSpawnPositions();
+        if (empty($spawnPositions)) {
+            $errors[] = "No spawn positions are set";
+        } elseif (count($spawnPositions) < $arena->getMinPlayers()) {
+            $errors[] = "Not enough spawn positions (need at least " . $arena->getMinPlayers() . ")";
+        }
+        
+        // Check if block type is set
+        if (empty($arena->getBlockType())) {
+            $errors[] = "Block type is not set";
+        }
+        
+        // Check if lobby position is set
+        $lobbyWorld = $arena->getLobbyWorld();
+        $lobbyPosition = $arena->getLobbyPosition();
+        if (empty($lobbyWorld)) {
+            $errors[] = "Lobby world is not set";
+        } elseif (!$this->plugin->getServer()->getWorldManager()->isWorldGenerated($lobbyWorld)) {
+            $errors[] = "Lobby world '$lobbyWorld' does not exist";
+        }
+        
+        if (empty($lobbyPosition) || 
+            !isset($lobbyPosition["x"]) || !isset($lobbyPosition["y"]) || !isset($lobbyPosition["z"])) {
+            $errors[] = "Lobby position is not set";
+        }
+        
+        return $errors;
+    }
+    
+    /**
+     * Validate that arena setup is complete
+     */
+    private function validateArenaSetup(Arena $arena): bool {
+        return empty($this->validateArenaSetupWithDetails($arena));
+    }
+
+    /**
+     * Handle the setup-exit command
+     */
+    private function handleSetupExitCommand(Player $sender): bool {
+        if (!$sender->hasPermission("tntrun.admin")) {
+            $sender->sendMessage(TF::RED . "You don't have permission to use this command.");
+            return false;
+        }
+
+        if (!isset($this->setupMode[$sender->getName()])) {
+            $sender->sendMessage(TF::RED . "You are not currently in setup mode.");
+            return false;
+        }
+
+        $arenaName = $this->setupMode[$sender->getName()];
+        $arena = $this->plugin->getArenaManager()->getArena($arenaName);
+        
+        if ($arena !== null) {
+            // Exit setup mode without saving changes
+            $arena->setSetupMode(false);
+        }
+        
+        unset($this->setupMode[$sender->getName()]);
+        
+        // Restore player location
+        $this->restoreSetupPlayerLocation($sender);
+        
+        $sender->sendMessage(TF::YELLOW . "Exited setup mode for arena '$arenaName'.");
+        $sender->sendMessage(TF::GRAY . "Note: Individual commands (setspawn, setlobby, etc.) are saved immediately.");
+        $sender->sendMessage(TF::GRAY . "Arena remains in setup status - use setup-complete to make it ready for play.");
+        
+        // Play exit sound
+        $sender->getWorld()->addSound($sender->getPosition(), new \pocketmine\world\sound\AnvilFallSound());
+        
+        return true;
+    }
+
+    /**
+     * Copy arena world to plugin data folder for backup
+     */
+    private function copyArenaWorld(Arena $arena): bool {
+        $worldName = $arena->getWorld();
+        $worldManager = $this->plugin->getServer()->getWorldManager();
+        
+        // Get the world
+        $world = $worldManager->getWorldByName($worldName);
+        if ($world === null) {
+            if (!$worldManager->loadWorld($worldName)) {
+                return false;
+            }
+            $world = $worldManager->getWorldByName($worldName);
+            if ($world === null) {
+                return false;
+            }
+        }
+
+        // Save world before copying to ensure consistency
+        $world->save(true);
+
+        // Create backup directory using world name for consistency with restoration
+        $backupDir = $this->plugin->getDataFolder() . "worlds" . DIRECTORY_SEPARATOR . $arena->getWorld();
+        if (!is_dir($backupDir)) {
+            if (!mkdir($backupDir, 0755, true)) {
+                return false;
+            }
+        }
+
+        // Copy world files
+        $worldPath = rtrim($world->getProvider()->getPath(), DIRECTORY_SEPARATOR);
+        return $this->copyDirectory($worldPath, $backupDir);
+    }
+
+    /**
+     * Recursively copy directory
+     */
+    private function copyDirectory(string $source, string $destination): bool {
+        if (!is_dir($source)) {
+            return false;
+        }
+
+        if (!is_dir($destination)) {
+            if (!mkdir($destination, 0755, true)) {
+                return false;
+            }
+        }
+
+        $files = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($source, \RecursiveDirectoryIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::SELF_FIRST
+        );
+
+        foreach ($files as $file) {
+            $sourceBasePath = rtrim($source, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+            $relativePath = substr($file->getPathname(), strlen($sourceBasePath));
+            $destinationPath = $destination . DIRECTORY_SEPARATOR . $relativePath;
+
+            if ($file->isDir()) {
+                if (!is_dir($destinationPath)) {
+                    if (!mkdir($destinationPath, 0755, true)) {
+                        return false;
+                    }
+                }
+            } else {
+                // Skip session lock files and other transient files
+                if (str_ends_with($file->getFilename(), '.lock') || 
+                    str_ends_with($file->getFilename(), '.tmp')) {
+                    continue;
+                }
+                
+                if (!copy($file->getPathname(), $destinationPath)) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * Handle the help command
      */
     private function handleHelpCommand(Player $sender): bool {
@@ -551,6 +828,8 @@ class TnTRunCommand extends Command implements PluginOwned {
             $sender->sendMessage(TF::GREEN . "/tr setspawn <name> <position>" . TF::WHITE . " - Set a spawn position");
             $sender->sendMessage(TF::GREEN . "/tr typeblock <name> <blockname>" . TF::WHITE . " - Set the block type");
             $sender->sendMessage(TF::GREEN . "/tr setlobby <name> <world>" . TF::WHITE . " - Set the lobby location");
+            $sender->sendMessage(TF::GREEN . "/tr setup-complete <name>" . TF::WHITE . " - Complete arena setup and set to ready");
+            $sender->sendMessage(TF::GREEN . "/tr setup-exit" . TF::WHITE . " - Exit setup mode without saving");
             $sender->sendMessage(TF::GREEN . "/tr force-start <name>" . TF::WHITE . " - Force start an arena");
             $sender->sendMessage(TF::GREEN . "/tr force-stop <name>" . TF::WHITE . " - Force stop an arena");
             $sender->sendMessage(TF::GREEN . "/tr force-clear <name>" . TF::WHITE . " - Force clear an arena");

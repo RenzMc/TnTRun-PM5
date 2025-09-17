@@ -43,12 +43,36 @@ class ArenaManager {
                 }
                 
                 if ($this->validateArenaConfig($config)) {
+                    // Pre-load the arena world to ensure it's available
+                    $worldName = $config->get("world");
+                    $worldManager = \pocketmine\Server::getInstance()->getWorldManager();
+                    
+                    if (!$worldManager->isWorldLoaded($worldName)) {
+                        $this->plugin->getLogger()->debug("Pre-loading arena world '{$worldName}' for arena '{$arenaName}'");
+                        if (!$worldManager->loadWorld($worldName)) {
+                            $this->plugin->getLogger()->warning("Failed to pre-load world '{$worldName}' for arena '{$arenaName}'. Arena may not function correctly.");
+                        } else {
+                            $this->plugin->getLogger()->debug("Successfully pre-loaded world '{$worldName}' for arena '{$arenaName}'");
+                        }
+                    }
+                    
+                    // Pre-load the lobby world if it exists and is different from arena world
+                    $lobbyWorld = $config->get("lobbyWorld", "");
+                    if (!empty($lobbyWorld) && $lobbyWorld !== $worldName && !$worldManager->isWorldLoaded($lobbyWorld)) {
+                        $this->plugin->getLogger()->debug("Pre-loading lobby world '{$lobbyWorld}' for arena '{$arenaName}'");
+                        if (!$worldManager->loadWorld($lobbyWorld)) {
+                            $this->plugin->getLogger()->warning("Failed to pre-load lobby world '{$lobbyWorld}' for arena '{$arenaName}'. Lobby teleportation may not work correctly.");
+                        } else {
+                            $this->plugin->getLogger()->debug("Successfully pre-loaded lobby world '{$lobbyWorld}' for arena '{$arenaName}'");
+                        }
+                    }
+                    
                     $arena = new Arena(
                         $arenaName,
-                        $config->get("world"),
+                        $worldName,
                         max(1, $config->get("minPlayers", 2)), // Ensure minimum 1 player
                         max(2, $config->get("maxPlayers", 10)), // Ensure minimum 2 max players
-                        $config->get("lobbyWorld", ""),
+                        $lobbyWorld,
                         $config->get("lobbyPosition", []),
                         $this->validateSpawnPositions($config->get("spawnPositions", [])),
                         $config->get("blockType", "tnt")

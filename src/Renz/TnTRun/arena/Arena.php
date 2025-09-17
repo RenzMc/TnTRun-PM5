@@ -7,6 +7,7 @@ namespace Renz\TnTRun\arena;
 use pocketmine\player\Player;
 use pocketmine\world\Position;
 use pocketmine\world\World;
+use pocketmine\world\sound\XpLevelUpSound;
 use pocketmine\Server;
 use pocketmine\block\VanillaBlocks;
 use pocketmine\math\Vector3;
@@ -21,6 +22,7 @@ class Arena {
     public const STATUS_PLAYING = 2;
     public const STATUS_ENDING = 3;
     public const STATUS_SETUP = 4;
+    public const STATUS_RESETTING = 5;
 
     /** @var string */
     private string $name;
@@ -103,7 +105,7 @@ class Arena {
      * Join a player to the arena
      */
     public function joinPlayer(Player $player): bool {
-        // Only allow joining during waiting state
+        // Only allow joining during waiting state (not during reset or other states)
         if ($this->status !== self::STATUS_WAITING) {
             return false;
         }
@@ -271,14 +273,6 @@ class Arena {
             // Clear inventory and give game items
             $player->getInventory()->clearAll();
             $player->getArmorInventory()->clearAll();
-            
-            // Freeze players by setting effect (compatible alternative)
-            $player->getEffects()->add(new \pocketmine\entity\effect\EffectInstance(
-                \pocketmine\entity\effect\VanillaEffects::SLOWNESS(),
-                99999, // Duration in ticks (very long)
-                255,   // Amplifier (maximum slowness)
-                false  // Not visible
-            ));
         }
         
         // Start pre-start countdown (3-2-1-GO)
@@ -317,7 +311,7 @@ class Arena {
                     $block = $world->getBlock($blockPos);
                     
                     // Don't remove air blocks
-                    if (!$block->isSameType(\pocketmine\block\VanillaBlocks::AIR())) {
+                    if (!$block->hasSameTypeId(\pocketmine\block\VanillaBlocks::AIR())) {
                         // Replace with air
                         $world->setBlock($blockPos, VanillaBlocks::AIR());
                         
@@ -350,7 +344,7 @@ class Arena {
                 $this->broadcastMessage(TF::GREEN . $winner->getName() . " has won the game!");
                 
                 // Play victory sound
-                $winner->getWorld()->addSound($winner->getPosition(), new \pocketmine\world\sound\LevelUpSound());
+                $winner->getWorld()->addSound($winner->getPosition(), new XpLevelUpSound(1));
             }
         } else {
             $this->broadcastTitle(TF::RED . "Game Over!");
@@ -375,15 +369,23 @@ class Arena {
      * Reset the arena
      */
     public function resetArena(): void {
+        $plugin = TnTRun::getInstance();
+        $plugin->getLogger()->debug("Starting reset for arena {$this->name}");
+        
         // Cancel ALL running tasks first (comprehensive safety)
         $this->cancelAllTasks();
         
+        // Set to resetting status to prevent new joins
+        $this->status = self::STATUS_RESETTING;
+        
+        // CRITICAL SAFETY: Ensure 0 players before world reset
         // Return all players to their original locations safely
         foreach ($this->players as $player) {
             if ($player instanceof Player && $player->isOnline()) {
                 // Clear effects before restoring location
                 $player->getEffects()->clear();
                 $this->restorePlayerLocation($player);
+                $plugin->getLogger()->debug("Restored player {$player->getName()} to original location during arena reset");
             }
         }
         
@@ -392,10 +394,279 @@ class Arena {
         $this->spectators = [];
         $this->votes = [];
         
-        // Reset status and all counters
-        $this->status = self::STATUS_WAITING;
+        // Reset counters
         $this->countdownTime = 0;
         $this->preStartTime = 0;
+        
+        // Make sure the world is loaded before attempting to check if it's empty or restore it
+        $worldManager = Server::getInstance()->getWorldManager();
+        if (!$worldManager->isWorldLoaded($this->world)) {
+            $plugin->getLogger()->debug("Loading arena world '{$this->world}' before reset");
+            if (!$worldManager->loadWorld($this->world)) {
+                $plugin->getLogger()->error("Failed to load arena world '{$this->world}' for reset - scheduling retry");
+                $this->scheduleArenaResetRetry();
+                return;
+            }
+        }
+        
+        // Attempt world restoration - only set to WAITING if successful
+        if ($this->isArenaWorldEmpty()) {
+            if ($this->restoreWorldFromBackup()) {
+                // World restored successfully - arena is ready
+                $this->status = self::STATUS_WAITING;
+                $plugin->getLogger()->info("Arena {$this->name} reset completed successfully");
+            } else {
+                // World restoration failed - schedule retry
+                $plugin->getLogger()->warning("Arena {$this->name} world restoration failed - scheduling retry");
+                $this->scheduleArenaResetRetry();
+            }
+        } else {
+            // World still has players - schedule retry
+            $plugin->getLogger()->warning("Arena {$this->name} world reset skipped - players still in arena world - scheduling retry");
+            $this->scheduleArenaResetRetry();
+        }
+    }
+
+    /**
+     * Schedule a retry for complete arena reset after delay
+     */
+    private function scheduleArenaResetRetry(): void {
+        $plugin = TnTRun::getInstance();
+        $arenaName = $this->name;
+        
+        $plugin->getScheduler()->scheduleDelayedTask(new ClosureTask(
+            function() use ($plugin, $arenaName): void {
+                $arena = $plugin->getArenaManager()->getArena($arenaName);
+                if ($arena !== null && $arena->getStatus() === Arena::STATUS_RESETTING) {
+                    $arena->resetArena();
+                }
+            }
+        ), 100); // 5 seconds delay with exponential backoff consideration
+    }
+
+    /**
+     * Check if arena world is empty of all players and force-teleport any remaining
+     */
+    private function isArenaWorldEmpty(): bool {
+        $world = Server::getInstance()->getWorldManager()->getWorldByName($this->world);
+        if ($world === null) {
+            return true; // World not loaded, consider it empty
+        }
+        
+        // Check if any players are still in the arena world
+        $playersInWorld = $world->getPlayers();
+        
+        // Force-teleport any remaining players (including untracked ones)
+        foreach ($playersInWorld as $player) {
+            if ($player instanceof Player && $player->isOnline()) {
+                // Try to find their original location first
+                if (isset($this->playerOriginalLocations[$player->getName()])) {
+                    $this->restorePlayerLocation($player);
+                } else {
+                    // Fallback: teleport to server default world spawn
+                    $defaultWorld = Server::getInstance()->getWorldManager()->getDefaultWorld();
+                    if ($defaultWorld !== null) {
+                        $player->teleport($defaultWorld->getSpawnLocation());
+                        $player->sendMessage("You were teleported from arena world during reset.");
+                    }
+                }
+            }
+        }
+        
+        // Re-check if world is now empty
+        $playersInWorld = $world->getPlayers();
+        return empty($playersInWorld);
+    }
+
+    /**
+     * Restore arena world from backup
+     */
+    private function restoreWorldFromBackup(): bool {
+        $plugin = TnTRun::getInstance();
+        $worldManager = Server::getInstance()->getWorldManager();
+        
+        // Check if backup exists (use world name for consistency)
+        $backupDir = $plugin->getDataFolder() . "worlds" . DIRECTORY_SEPARATOR . $this->world;
+        if (!is_dir($backupDir)) {
+            $plugin->getLogger()->warning("No backup found for arena {$this->name} (world: {$this->world}) at {$backupDir}");
+            return false;
+        }
+        
+        $plugin->getLogger()->info("Restoring world {$this->world} for arena {$this->name} from backup");
+        
+        try {
+            // Make sure the world is loaded before attempting to save it
+            if (!$worldManager->isWorldLoaded($this->world)) {
+                $plugin->getLogger()->debug("Loading world {$this->world} before saving and unloading for reset");
+                if (!$worldManager->loadWorld($this->world)) {
+                    $plugin->getLogger()->error("Failed to load world {$this->world} for arena {$this->name} before reset");
+                    return false;
+                }
+            }
+            
+            // Save and unload the current world
+            $world = $worldManager->getWorldByName($this->world);
+            if ($world !== null) {
+                $plugin->getLogger()->debug("Saving world {$this->world} before unloading for reset");
+                $world->save(true);
+                
+                // Double check that no players are in the world
+                if (count($world->getPlayers()) > 0) {
+                    $plugin->getLogger()->warning("Players still in world {$this->world} during reset attempt - teleporting them out");
+                    foreach ($world->getPlayers() as $player) {
+                        // Teleport to server default world
+                        $defaultWorld = $worldManager->getDefaultWorld();
+                        if ($defaultWorld !== null) {
+                            $player->teleport($defaultWorld->getSpawnLocation());
+                            $player->sendMessage("You were teleported out of an arena world that is being reset.");
+                        }
+                    }
+                }
+                
+                $plugin->getLogger()->debug("Unloading world {$this->world} for reset");
+                if (!$worldManager->unloadWorld($world)) {
+                    $plugin->getLogger()->error("Failed to unload world {$this->world} for arena {$this->name} - scheduling retry");
+                    $this->scheduleWorldResetRetry();
+                    return false;
+                }
+                $plugin->getLogger()->debug("Successfully unloaded world {$this->world}");
+            }
+            
+            // Get world path
+            $worldPath = Server::getInstance()->getDataPath() . "worlds" . DIRECTORY_SEPARATOR . $this->world;
+            
+            // Remove current world data - CRITICAL: check for success
+            if (is_dir($worldPath)) {
+                $plugin->getLogger()->debug("Removing existing world data at {$worldPath}");
+                if (!$this->removeDirectory($worldPath)) {
+                    $plugin->getLogger()->error("Failed to remove existing world data at {$worldPath} for arena {$this->name}");
+                    // Try to reload the world since we can't clean it
+                    $worldManager->loadWorld($this->world);
+                    return false;
+                }
+                $plugin->getLogger()->debug("Successfully removed existing world data");
+            }
+            
+            // Copy backup to world location
+            $plugin->getLogger()->debug("Copying backup from {$backupDir} to {$worldPath}");
+            if (!$this->copyDirectory($backupDir, $worldPath)) {
+                $plugin->getLogger()->error("Failed to restore world backup for arena {$this->name}");
+                return false;
+            }
+            $plugin->getLogger()->debug("Successfully copied world backup");
+            
+            // Reload the world
+            $plugin->getLogger()->debug("Reloading world {$this->world} after reset");
+            if (!$worldManager->loadWorld($this->world)) {
+                $plugin->getLogger()->error("Failed to reload world {$this->world} for arena {$this->name}");
+                return false;
+            }
+            
+            $plugin->getLogger()->info("Successfully restored world {$this->world} for arena {$this->name}");
+            return true;
+            
+        } catch (\Throwable $e) {
+            $plugin->getLogger()->error("Error restoring world for arena {$this->name}: " . $e->getMessage());
+            // Try to reload the world as fallback
+            try {
+                $plugin->getLogger()->debug("Attempting to reload world after error");
+                $worldManager->loadWorld($this->world);
+            } catch (\Throwable $e2) {
+                $plugin->getLogger()->error("Failed to reload world after error: " . $e2->getMessage());
+            }
+            return false;
+        }
+    }
+
+    /**
+     * Schedule a retry for world reset after delay
+     */
+    private function scheduleWorldResetRetry(): void {
+        $plugin = TnTRun::getInstance();
+        $arenaName = $this->name;
+        
+        $plugin->getScheduler()->scheduleDelayedTask(new ClosureTask(
+            function() use ($plugin, $arenaName): void {
+                $arena = $plugin->getArenaManager()->getArena($arenaName);
+                if ($arena !== null && $arena->isArenaWorldEmpty()) {
+                    $arena->restoreWorldFromBackup();
+                }
+            }
+        ), 200); // 10 seconds delay
+    }
+
+    /**
+     * Recursively remove directory
+     */
+    private function removeDirectory(string $dir): bool {
+        if (!is_dir($dir)) {
+            return true;
+        }
+        
+        $files = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($dir, \RecursiveDirectoryIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::CHILD_FIRST
+        );
+        
+        foreach ($files as $file) {
+            if ($file->isDir()) {
+                if (!rmdir($file->getPathname())) {
+                    return false;
+                }
+            } else {
+                if (!unlink($file->getPathname())) {
+                    return false;
+                }
+            }
+        }
+        
+        return rmdir($dir);
+    }
+
+    /**
+     * Recursively copy directory
+     */
+    private function copyDirectory(string $source, string $destination): bool {
+        if (!is_dir($source)) {
+            return false;
+        }
+
+        if (!is_dir($destination)) {
+            if (!mkdir($destination, 0755, true)) {
+                return false;
+            }
+        }
+
+        $files = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($source, \RecursiveDirectoryIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::SELF_FIRST
+        );
+
+        foreach ($files as $file) {
+            $sourceBasePath = rtrim($source, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+            $relativePath = substr($file->getPathname(), strlen($sourceBasePath));
+            $destinationPath = $destination . DIRECTORY_SEPARATOR . $relativePath;
+
+            if ($file->isDir()) {
+                if (!is_dir($destinationPath)) {
+                    if (!mkdir($destinationPath, 0755, true)) {
+                        return false;
+                    }
+                }
+            } else {
+                // Skip session lock files and other transient files
+                if (str_ends_with($file->getFilename(), '.lock') || 
+                    str_ends_with($file->getFilename(), '.tmp')) {
+                    continue;
+                }
+                
+                if (!copy($file->getPathname(), $destinationPath)) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -426,50 +697,47 @@ class Arena {
     /**
      * Restore player's original location
      */
-    private function restorePlayerLocation(Player $player): void {
-        $playerName = $player->getName();
-        
-        if (!isset($this->playerOriginalLocations[$playerName])) {
-            return;
-        }
-        
-        $locationData = $this->playerOriginalLocations[$playerName];
-        $world = Server::getInstance()->getWorldManager()->getWorldByName($locationData["world"]);
-        
-        if ($world !== null) {
-            $location = new \pocketmine\world\Location(
+    private function restorePlayerLocation(Player $player): void
+{
+    $playerName = $player->getName();
+
+    if (!isset($this->playerOriginalLocations[$playerName])) {
+        return;
+    }
+
+    $locationData = $this->playerOriginalLocations[$playerName];
+    $world = Server::getInstance()->getWorldManager()->getWorldByName($locationData["world"]);
+
+    if ($world !== null) {
+        $location = \pocketmine\entity\Location::fromObject(
+            new \pocketmine\math\Vector3(
                 $locationData["x"],
                 $locationData["y"],
-                $locationData["z"],
-                $world,
-                $locationData["yaw"],
-                $locationData["pitch"]
-            );
-            
-            $player->teleport($location);
-            
-            // Restore player's original gamemode
-            if (isset($locationData["gamemode"])) {
-                // Convert integer gamemode to enum case
-                switch ($locationData["gamemode"]) {
-                    case 0:
-                        $player->setGamemode(\pocketmine\player\GameMode::SURVIVAL);
-                        break;
-                    case 1:
-                        $player->setGamemode(\pocketmine\player\GameMode::CREATIVE);
-                        break;
-                    case 2:
-                        $player->setGamemode(\pocketmine\player\GameMode::ADVENTURE);
-                        break;
-                    case 3:
-                        $player->setGamemode(\pocketmine\player\GameMode::SPECTATOR);
-                        break;
-                }
-            }
+                $locationData["z"]
+            ),
+            $world,
+            $locationData["yaw"],
+            $locationData["pitch"]
+        );
+
+        $player->teleport($location);
+
+        // Restore player's original gamemode
+        if (isset($locationData["gamemode"])) {
+            $gamemode = match ($locationData["gamemode"]) {
+                0 => \pocketmine\player\GameMode::SURVIVAL(),
+                1 => \pocketmine\player\GameMode::CREATIVE(),
+                2 => \pocketmine\player\GameMode::ADVENTURE(),
+                3 => \pocketmine\player\GameMode::SPECTATOR(),
+                default => \pocketmine\player\GameMode::SURVIVAL(), // fallback (optional)
+            };
+
+            $player->setGamemode($gamemode);
         }
-        
-        unset($this->playerOriginalLocations[$playerName]);
     }
+
+    unset($this->playerOriginalLocations[$playerName]);
+}
 
     /**
      * Teleport player to lobby
@@ -481,17 +749,19 @@ class Arena {
             return;
         }
         
-        $world = Server::getInstance()->getWorldManager()->getWorldByName($this->lobbyWorld);
+        $worldManager = Server::getInstance()->getWorldManager();
         
-        if ($world === null) {
-            // Try to load the world first
-            if (!Server::getInstance()->getWorldManager()->loadWorld($this->lobbyWorld)) {
-                // Fallback to arena teleport if lobby world fails to load
+        // Check if world is loaded, if not try to load it
+        if (!$worldManager->isWorldLoaded($this->lobbyWorld)) {
+            TnTRun::getInstance()->getLogger()->debug("Loading lobby world '{$this->lobbyWorld}' before teleporting player");
+            if (!$worldManager->loadWorld($this->lobbyWorld)) {
+                TnTRun::getInstance()->getLogger()->warning("Failed to load lobby world '{$this->lobbyWorld}', falling back to arena teleport");
                 $this->teleportToArena($player);
                 return;
             }
-            $world = Server::getInstance()->getWorldManager()->getWorldByName($this->lobbyWorld);
         }
+        
+        $world = $worldManager->getWorldByName($this->lobbyWorld);
         
         if ($world !== null && isset($this->lobbyPosition["x"], $this->lobbyPosition["y"], $this->lobbyPosition["z"])) {
             // Ensure Y coordinate is safe (not below 0 or above 320)
@@ -505,8 +775,10 @@ class Arena {
             );
             
             $player->teleport($position);
+            TnTRun::getInstance()->getLogger()->debug("Teleported player {$player->getName()} to lobby in world '{$this->lobbyWorld}'");
         } else {
             // Ultimate fallback to arena teleport
+            TnTRun::getInstance()->getLogger()->warning("Invalid lobby position or world, falling back to arena teleport");
             $this->teleportToArena($player);
         }
     }
@@ -515,21 +787,25 @@ class Arena {
      * Teleport player to arena
      */
     private function teleportToArena(Player $player): void {
-        $world = Server::getInstance()->getWorldManager()->getWorldByName($this->world);
+        $worldManager = Server::getInstance()->getWorldManager();
+        $plugin = TnTRun::getInstance();
         
-        if ($world === null) {
-            // Try to load the world first
-            if (!Server::getInstance()->getWorldManager()->loadWorld($this->world)) {
-                // Critical error - cannot load arena world
+        // Check if world is loaded, if not try to load it
+        if (!$worldManager->isWorldLoaded($this->world)) {
+            $plugin->getLogger()->debug("Loading arena world '{$this->world}' before teleporting player");
+            if (!$worldManager->loadWorld($this->world)) {
+                $plugin->getLogger()->error("Critical error: Arena world '{$this->world}' could not be loaded!");
                 $player->sendMessage(TF::RED . "Error: Arena world could not be loaded!");
                 return;
             }
-            $world = Server::getInstance()->getWorldManager()->getWorldByName($this->world);
-            
-            if ($world === null) {
-                $player->sendMessage(TF::RED . "Error: Arena world is not available!");
-                return;
-            }
+        }
+        
+        $world = $worldManager->getWorldByName($this->world);
+        
+        if ($world === null) {
+            $plugin->getLogger()->error("Critical error: Arena world '{$this->world}' is null after loading attempt!");
+            $player->sendMessage(TF::RED . "Error: Arena world is not available!");
+            return;
         }
         
         // Check if spawn positions are configured and not empty
@@ -549,11 +825,13 @@ class Arena {
                 );
                 
                 $player->teleport($position);
+                $plugin->getLogger()->debug("Teleported player {$player->getName()} to spawn position {$spawnIndex} in arena world '{$this->world}'");
                 return;
             }
         }
         
         // Fallback to world's spawn point if no valid spawn positions
+        $plugin->getLogger()->warning("No valid spawn positions found for arena '{$this->name}', using world spawn");
         $worldSpawn = $world->getSpawnLocation();
         // Ensure spawn Y is safe
         $safeSpawn = new Position(
@@ -563,6 +841,7 @@ class Arena {
             $world
         );
         $player->teleport($safeSpawn);
+        $plugin->getLogger()->debug("Teleported player {$player->getName()} to world spawn in arena world '{$this->world}'");
     }
 
     /**
@@ -570,7 +849,7 @@ class Arena {
      */
     private function giveLobbyItems(Player $player): void {
         // Item to leave arena (slot 0)
-        $leaveItem = \pocketmine\item\VanillaItems::REDSTONE();
+        $leaveItem = \pocketmine\item\VanillaItems::REDSTONE_DUST();
         $leaveItem->setCustomName(TF::RED . "Leave Arena");
         $player->getInventory()->setItem(0, $leaveItem);
         
@@ -680,35 +959,26 @@ class Arena {
         $this->blockType = $blockType;
     }
     
-    /**
+     /**
      * Get the block instance based on the configured block type
      */
     public function getBlockInstance(): \pocketmine\block\Block {
-        // Convert string block type to actual block instance
-        $blockType = strtolower($this->blockType);
-        
-        switch ($blockType) {
-            case "tnt":
-                return VanillaBlocks::TNT();
-            case "sand":
-                return VanillaBlocks::SAND();
-            case "gravel":
-                return VanillaBlocks::GRAVEL();
-            case "dirt":
-                return VanillaBlocks::DIRT();
-            case "stone":
-                return VanillaBlocks::STONE();
-            case "grass":
-                return VanillaBlocks::GRASS();
-            case "planks":
-            case "wood":
-                return VanillaBlocks::OAK_PLANKS();
-            default:
-                // Default to TNT if block type is not recognized
-                return VanillaBlocks::TNT();
-        }
-    }
+        $method = strtoupper($this->blockType);
+        $method = preg_replace('/[^A-Z0-9_]/', '_', $method); // sanitize
 
+        // Cek method statis di VanillaBlocks
+        if (method_exists(\pocketmine\block\VanillaBlocks::class, $method)) {
+            try {
+                return call_user_func([\pocketmine\block\VanillaBlocks::class, $method]);
+            } catch (\Throwable $e) {
+                return \pocketmine\block\VanillaBlocks::TNT();
+            }
+        }
+
+        // fallback default ke TNT
+        return \pocketmine\block\VanillaBlocks::TNT();
+    }
+    
     /**
      * Get arena name
      */

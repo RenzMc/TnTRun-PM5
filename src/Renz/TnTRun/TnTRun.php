@@ -51,6 +51,16 @@ class TnTRun extends PluginBase {
             }
         }
 
+        // Create worlds directory if it doesn't exist
+        $worldsFolder = $dataFolder . "worlds";
+        if (!is_dir($worldsFolder)) {
+            if (!mkdir($worldsFolder, 0755, true)) {
+                $this->getLogger()->error("Failed to create worlds folder: " . $worldsFolder);
+                $this->getServer()->getPluginManager()->disablePlugin($this);
+                return;
+            }
+        }
+
         // Save default resources with error handling
         try {
             $this->saveDefaultConfig();
@@ -70,6 +80,42 @@ class TnTRun extends PluginBase {
             $this->getServer()->getPluginManager()->disablePlugin($this);
             return;
         }
+
+        // Load all arena worlds to ensure they're ready for play
+        $this->getLogger()->info("Loading arena worlds...");
+        $loadedCount = 0;
+        $failedCount = 0;
+        
+        foreach ($this->arenaManager->getArenas() as $arena) {
+            $worldName = $arena->getWorld();
+            $worldManager = $this->getServer()->getWorldManager();
+            
+            // Skip if world is already loaded
+            if ($worldManager->isWorldLoaded($worldName)) {
+                $this->getLogger()->debug("Arena world '{$worldName}' is already loaded");
+                $loadedCount++;
+                continue;
+            }
+            
+            // Try to load the world
+            $this->getLogger()->debug("Loading arena world '{$worldName}'...");
+            if ($worldManager->loadWorld($worldName)) {
+                $this->getLogger()->debug("Successfully loaded arena world '{$worldName}'");
+                $loadedCount++;
+                
+                // Reset arena world from backup if available
+                $backupDir = $this->getDataFolder() . "worlds" . DIRECTORY_SEPARATOR . $worldName;
+                if (is_dir($backupDir)) {
+                    $this->getLogger()->debug("Found backup for world '{$worldName}', restoring...");
+                    $arena->resetArena();
+                }
+            } else {
+                $this->getLogger()->warning("Failed to load arena world '{$worldName}'. Arena may not function correctly.");
+                $failedCount++;
+            }
+        }
+        
+        $this->getLogger()->info("Arena worlds loaded: {$loadedCount} success, {$failedCount} failed");
 
         // Register command
         $this->getServer()->getCommandMap()->register("tntrun", new TnTRunCommand($this));

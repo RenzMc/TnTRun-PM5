@@ -84,7 +84,7 @@ class EventListener implements Listener {
                     $arena->broadcastMessage(TF::GOLD . $winner->getName() . TF::GREEN . " has won the game!");
                     
                     // Play victory sound
-                    $winner->getWorld()->addSound($winner->getPosition(), new \pocketmine\world\sound\LevelUpSound());
+                    $winner->getWorld()->addSound($winner->getPosition(), new \pocketmine\world\sound\XpLevelUpSound(1));
                 }
                 
                 // End the game regardless of winner state
@@ -192,7 +192,7 @@ class EventListener implements Listener {
                             $arena->broadcastMessage(TF::GOLD . $winner->getName() . TF::GREEN . " has won the game!");
                             
                             // Play victory sound
-                            $winner->getWorld()->addSound($winner->getPosition(), new \pocketmine\world\sound\LevelUpSound());
+                            $winner->getWorld()->addSound($winner->getPosition(), new \pocketmine\world\sound\XpLevelUpSound(1));
                         }
                         
                         // End the game regardless of winner state
@@ -208,7 +208,7 @@ class EventListener implements Listener {
                     $block = $world->getBlock($blockPos);
                     
                     // Don't remove air blocks
-                    if (!$block->isSameType(\pocketmine\block\VanillaBlocks::AIR())) {
+                    if (!$block->hasSameTypeId(\pocketmine\block\VanillaBlocks::AIR())) {
                         // Replace with air
                         $world->setBlock($blockPos, \pocketmine\block\VanillaBlocks::AIR());
                         
@@ -275,7 +275,7 @@ class EventListener implements Listener {
                                 $arena->broadcastMessage(TF::GOLD . $winner->getName() . TF::GREEN . " has won the game!");
                                 
                                 // Play victory sound
-                                $winner->getWorld()->addSound($winner->getPosition(), new \pocketmine\world\sound\LevelUpSound());
+                                $winner->getWorld()->addSound($winner->getPosition(), new \pocketmine\world\sound\XpLevelUpSound(1));
                             }
                             
                             // End the game
