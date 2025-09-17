@@ -25,14 +25,15 @@ TnTRun is a minigame where players run on a floor that disappears beneath them. 
 - `/tr vote` - Vote for a map
 
 ### Admin Commands
-
-- `/tr create <name> <world> <minPlayers> <maxPlayers>` - Create a new arena
-- `/tr setup <name>` - Enter setup mode for an arena
-- `/tr setspawn <name> <position>` - Set a spawn position in the arena
-- `/tr typeblock <name> <blockname>` - Set the block type for the arena
-- `/tr setlobby <name> <world>` - Set the lobby location for the arena
-- `/tr force-start <name>` - Force start an arena
-- `/tr force-stop <name>` - Force stop an arena
+- `/tr create <name> <world> <minPlayers> <maxPlayers>` - Create a new arena  
+- `/tr setup <name>` - Enter setup mode for an arena  
+- `/tr setspawn <name> <position>` - Set a spawn position  
+- `/tr typeblock <name> <blockname>` - Set the block type  
+- `/tr setlobby <name> <world>` - Set the lobby location  
+- `/tr setup-complete <name>` - Complete arena setup and set to ready  
+- `/tr setup-exit` - Exit setup mode without saving  
+- `/tr force-start <name>` - Force start an arena  
+- `/tr force-stop <name>` - Force stop an arena  
 - `/tr force-clear <name>` - Force clear an arena
 
 ## Permissions
