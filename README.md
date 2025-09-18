@@ -72,7 +72,3 @@ The plugin's configuration file (`config.yml`) allows you to customize various a
 - Messages
 - Form UI text
 - Item settings
-
-## Author
-
-- Renz
